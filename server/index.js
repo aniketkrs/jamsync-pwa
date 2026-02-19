@@ -285,6 +285,27 @@ wss.on('connection', (ws) => {
                 break;
             }
 
+            // ━━━ Audio Ready (Host notifies server) ━━━━━━━━━━━━━
+
+            case 'AUDIO_READY': {
+                const info = clientRooms.get(ws);
+                if (!info || info.role !== 'host') return;
+
+                const room = rooms.get(info.roomCode);
+                if (!room) return;
+
+                // Tell host to initiate WebRTC for each existing listener
+                for (const [, listener] of room.listeners) {
+                    sendTo(ws, {
+                        type: 'INITIATE_PEER',
+                        targetUserId: listener.userId,
+                        targetName: listener.name
+                    });
+                }
+                console.log(`[AUDIO] Host ${info.name} ready, initiating peers for ${room.listeners.size} listeners`);
+                break;
+            }
+
             default:
                 break;
         }

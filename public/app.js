@@ -281,10 +281,31 @@
     // ─── WebRTC ────────────────────────────────────────────
     async function startScreenShare() {
         try {
-            localStream = await navigator.mediaDevices.getDisplayMedia({
-                video: false,
-                audio: true
+            // Browsers require video:true for getDisplayMedia
+            // We request both, then keep only audio
+            const displayStream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false
+                }
             });
+
+            // Check if we got an audio track
+            const audioTracks = displayStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                // Stop video tracks since we don't need them
+                displayStream.getTracks().forEach(t => t.stop());
+                showToast('No audio detected! Make sure to check "Share tab audio" in the share dialog.', true);
+                return;
+            }
+
+            // Create a new stream with only the audio track
+            localStream = new MediaStream(audioTracks);
+
+            // Stop video tracks — we only need audio
+            displayStream.getVideoTracks().forEach(t => t.stop());
 
             $('btnShareAudio').textContent = '🎵 Streaming Audio…';
             $('btnShareAudio').classList.add('streaming');
@@ -300,21 +321,23 @@
             });
 
             // Handle stream ending
-            localStream.getAudioTracks()[0].addEventListener('ended', () => {
+            audioTracks[0].addEventListener('ended', () => {
                 stopSharing();
             });
 
             showToast('Audio sharing started!');
 
-            // Create peer connections for all existing listeners
-            // The server will send INITIATE_PEER for each listener
+            // Notify server to initiate peer connections for existing listeners
+            send({ type: 'AUDIO_READY' });
 
         } catch (err) {
             console.error('[WebRTC] Screen share error:', err);
-            if (err.name === 'NotAllowedError') {
-                showToast('Permission denied. Please share a tab with audio.', true);
+            if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
+                showToast('Sharing cancelled. Click Share Tab Audio and select a tab to share.', true);
+            } else if (err.name === 'NotSupportedError') {
+                showToast('Your browser does not support screen sharing. Try Chrome or Edge on desktop.', true);
             } else {
-                showToast('Could not share audio. Try again.', true);
+                showToast(`Audio error: ${err.message || 'Unknown error'}. Try Chrome on desktop.`, true);
             }
         }
     }
