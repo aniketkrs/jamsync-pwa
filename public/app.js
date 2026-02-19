@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════
-   JamSync PWA — Main Application
-   WebSocket client, WebRTC audio, room management
+   JamSync PWA v2 — YouTube Sync
+   No screen share, no WebRTC. Just paste a URL and play.
    ═══════════════════════════════════════════════════════════ */
 
 (() => {
@@ -16,23 +16,12 @@
     let myName = '';
     let myRole = null;        // 'host' | 'listener'
     let currentRoom = null;
-    let localStream = null;   // Host's captured audio stream
-    let peerConnections = {}; // userId → RTCPeerConnection (Host manages these)
-
-    // WebRTC config with public STUN/TURN
-    const rtcConfig = {
-        iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' }
-        ]
-    };
+    let ytPlayer = null;
+    let ytReady = false;
+    let isSyncing = false;    // Flag to prevent sync loops
 
     // ─── Toast System ───────────────────────────────────────
     function showToast(message, isError = false) {
-        // Remove existing toast
         document.querySelectorAll('.toast').forEach(t => t.remove());
 
         const toast = document.createElement('div');
@@ -71,7 +60,6 @@
             console.log('[WS] Connected!');
             reconnectAttempts = 0;
 
-            // Flush queued messages
             while (messageQueue.length > 0) {
                 const msg = messageQueue.shift();
                 ws.send(JSON.stringify(msg));
@@ -87,7 +75,7 @@
         });
 
         ws.addEventListener('close', (event) => {
-            console.log('[WS] Disconnected, code:', event.code, 'reason:', event.reason);
+            console.log('[WS] Disconnected, code:', event.code);
             reconnectAttempts++;
             const delay = Math.min(1000 * reconnectAttempts, 10000);
             setTimeout(connectWebSocket, delay);
@@ -103,9 +91,8 @@
             ws.send(JSON.stringify(message));
             console.log('[WS] Sent:', message.type);
         } else {
-            console.log('[WS] Queued (not open yet):', message.type);
+            console.log('[WS] Queued:', message.type);
             messageQueue.push(message);
-            // Try reconnecting if not connected
             if (!ws || ws.readyState === WebSocket.CLOSED) {
                 connectWebSocket();
             }
@@ -146,11 +133,6 @@
                 addSystemMessage(`${msg.name} left the room`);
                 updateListenerCount(msg.listenerCount);
                 if (msg.roomInfo) updateListenerList(msg.roomInfo);
-                // Clean up peer connection if host
-                if (myRole === 'host' && peerConnections[msg.userId]) {
-                    peerConnections[msg.userId].close();
-                    delete peerConnections[msg.userId];
-                }
                 break;
 
             case 'ROOM_CLOSED':
@@ -164,39 +146,29 @@
                 showScreen('landingScreen');
                 break;
 
-            // ─── WebRTC Signaling ───────────────
-            case 'INITIATE_PEER':
-                // Host: create offer for new listener
-                if (myRole === 'host' && localStream) {
-                    createPeerConnection(msg.targetUserId, true);
+            // ─── YouTube Sync ────────────────────
+            case 'PLAY_URL':
+                loadVideo(msg.videoId, msg.title);
+                break;
+
+            case 'SYNC_STATE':
+                handleSyncState(msg);
+                break;
+
+            // ─── Controls (Listener → Host) ──────
+            case 'CONTROL':
+                if (myRole === 'host') {
+                    handleControlFromListener(msg);
                 }
                 break;
 
-            case 'SIGNAL':
-                handleSignal(msg);
-                break;
-
-            // ─── Chat & Reactions ───────────────
+            // ─── Chat & Reactions ────────────────
             case 'CHAT':
                 addChatMessage(msg.name, msg.message, msg.userId === myUserId);
                 break;
 
             case 'REACTION':
                 showFloatingReaction(msg.emoji);
-                break;
-
-            // ─── Playback ──────────────────────
-            case 'TRACK_UPDATE':
-                $('npTitle').textContent = msg.title || 'Unknown Track';
-                $('npArtist').textContent = msg.artist || '';
-                break;
-
-            case 'CONTROL':
-                // Host receives control from listener
-                if (myRole === 'host') {
-                    showToast(`${msg.fromName} pressed ${msg.action}`);
-                    // In a real implementation, this would control the music player
-                }
                 break;
 
             case 'SEARCH':
@@ -214,17 +186,195 @@
         updateListenerCount(roomInfo.listenerCount);
         updateListenerList(roomInfo);
 
-        // Show share audio button for host
+        // Show URL input for host, hide for listener
         if (myRole === 'host') {
-            $('btnShareAudio').classList.remove('hidden');
+            $('urlInputSection').classList.remove('hidden');
         } else {
-            $('btnShareAudio').classList.add('hidden');
+            $('urlInputSection').classList.add('hidden');
         }
 
-        // Update track info if available
-        if (roomInfo.trackInfo) {
-            $('npTitle').textContent = roomInfo.trackInfo.title || 'Waiting for audio…';
-            $('npArtist').textContent = roomInfo.trackInfo.artist || '';
+        // If room already has a video playing, load it
+        if (roomInfo.videoState && roomInfo.videoState.videoId) {
+            loadVideo(roomInfo.videoState.videoId, roomInfo.videoState.title);
+            // Seek to current position if playing
+            if (roomInfo.videoState.isPlaying && roomInfo.videoState.currentTime > 0) {
+                const elapsed = (Date.now() - roomInfo.videoState.timestamp) / 1000;
+                const seekTo = roomInfo.videoState.currentTime + elapsed;
+                setTimeout(() => {
+                    if (ytPlayer && ytReady) {
+                        ytPlayer.seekTo(seekTo, true);
+                        ytPlayer.playVideo();
+                    }
+                }, 1500);
+            }
+        }
+
+        initYouTubePlayer();
+    }
+
+    // ─── YouTube IFrame Player ─────────────────────────────
+    function initYouTubePlayer() {
+        if (ytPlayer) return; // Already initialized
+
+        // Load the YouTube IFrame API
+        if (!window.YT) {
+            const tag = document.createElement('script');
+            tag.src = 'https://www.youtube.com/iframe_api';
+            document.head.appendChild(tag);
+
+            window.onYouTubeIframeAPIReady = createPlayer;
+        } else {
+            createPlayer();
+        }
+    }
+
+    function createPlayer() {
+        ytPlayer = new YT.Player('ytPlayer', {
+            height: '100%',
+            width: '100%',
+            playerVars: {
+                autoplay: 0,
+                controls: 0, // We use our own controls
+                rel: 0,
+                modestbranding: 1,
+                fs: 0,
+                playsinline: 1
+            },
+            events: {
+                onReady: () => {
+                    ytReady = true;
+                    console.log('[YT] Player ready');
+                },
+                onStateChange: (event) => {
+                    handlePlayerStateChange(event.data);
+                },
+                onError: (event) => {
+                    console.error('[YT] Player error:', event.data);
+                    showToast('Could not play this video. Try another URL.', true);
+                }
+            }
+        });
+    }
+
+    function handlePlayerStateChange(state) {
+        // YT.PlayerState: UNSTARTED=-1, ENDED=0, PLAYING=1, PAUSED=2, BUFFERING=3, CUED=5
+        if (isSyncing) return; // Don't sync back if we're receiving a sync
+
+        if (myRole === 'host') {
+            const currentTime = ytPlayer ? ytPlayer.getCurrentTime() : 0;
+
+            if (state === 1) { // PLAYING
+                updatePlayPauseUI(true);
+                send({
+                    type: 'SYNC_STATE',
+                    action: 'play',
+                    isPlaying: true,
+                    currentTime
+                });
+            } else if (state === 2) { // PAUSED
+                updatePlayPauseUI(false);
+                send({
+                    type: 'SYNC_STATE',
+                    action: 'pause',
+                    isPlaying: false,
+                    currentTime
+                });
+            } else if (state === 0) { // ENDED
+                updatePlayPauseUI(false);
+                send({
+                    type: 'SYNC_STATE',
+                    action: 'pause',
+                    isPlaying: false,
+                    currentTime: 0
+                });
+            }
+        } else {
+            // Listener UI updates
+            if (state === 1) updatePlayPauseUI(true);
+            else if (state === 2 || state === 0) updatePlayPauseUI(false);
+        }
+    }
+
+    function updatePlayPauseUI(isPlaying) {
+        $('iconPlay').style.display = isPlaying ? 'none' : '';
+        $('iconPause').style.display = isPlaying ? '' : 'none';
+    }
+
+    // ─── YouTube URL Helpers ───────────────────────────────
+    function extractVideoId(url) {
+        if (!url) return null;
+
+        // Handle various YouTube URL formats
+        const patterns = [
+            /(?:youtube\.com\/watch\?v=|youtube\.com\/embed\/|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+            /^([a-zA-Z0-9_-]{11})$/  // Just the ID
+        ];
+
+        for (const pattern of patterns) {
+            const match = url.match(pattern);
+            if (match) return match[1];
+        }
+        return null;
+    }
+
+    function loadVideo(videoId, title) {
+        if (!videoId) return;
+
+        // Show player, hide placeholder
+        $('playerPlaceholder').style.display = 'none';
+        $('ytPlayer').style.display = 'block';
+
+        $('npTitle').textContent = title || 'Now Playing';
+
+        if (ytPlayer && ytReady) {
+            ytPlayer.loadVideoById(videoId);
+        } else {
+            // Player not ready yet, wait and retry
+            const checkReady = setInterval(() => {
+                if (ytPlayer && ytReady) {
+                    clearInterval(checkReady);
+                    ytPlayer.loadVideoById(videoId);
+                }
+            }, 500);
+            // Give up after 10s
+            setTimeout(() => clearInterval(checkReady), 10000);
+        }
+    }
+
+    // ─── Sync Handler (Listener) ───────────────────────────
+    function handleSyncState(msg) {
+        if (!ytPlayer || !ytReady) return;
+
+        isSyncing = true;
+
+        if (msg.action === 'play') {
+            const timeDiff = Math.abs(ytPlayer.getCurrentTime() - msg.currentTime);
+            if (timeDiff > 2) {
+                ytPlayer.seekTo(msg.currentTime, true);
+            }
+            ytPlayer.playVideo();
+            updatePlayPauseUI(true);
+        } else if (msg.action === 'pause') {
+            ytPlayer.pauseVideo();
+            updatePlayPauseUI(false);
+        } else if (msg.action === 'seek') {
+            ytPlayer.seekTo(msg.currentTime, true);
+            if (msg.isPlaying) ytPlayer.playVideo();
+        }
+
+        setTimeout(() => { isSyncing = false; }, 500);
+    }
+
+    // ─── Host: Control from Listener ───────────────────────
+    function handleControlFromListener(msg) {
+        showToast(`${msg.fromName} pressed ${msg.action}`);
+        // Actually execute the control
+        if (ytPlayer && ytReady) {
+            if (msg.action === 'TOGGLE') {
+                const state = ytPlayer.getPlayerState();
+                if (state === 1) ytPlayer.pauseVideo();
+                else ytPlayer.playVideo();
+            }
         }
     }
 
@@ -233,18 +383,16 @@
         const list = $('listenerList');
         list.innerHTML = '';
 
-        // Add host
         const hostEl = createListenerItem(roomInfo.hostName, 'HOST');
         list.appendChild(hostEl);
 
-        // Add listeners
         if (roomInfo.listeners && roomInfo.listeners.length > 0) {
             roomInfo.listeners.forEach(l => {
                 list.appendChild(createListenerItem(l.name, 'LISTENER'));
             });
         }
 
-        if (roomInfo.listeners.length === 0) {
+        if (!roomInfo.listeners || roomInfo.listeners.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.textContent = 'Share the room code to invite listeners!';
@@ -300,201 +448,20 @@
         setTimeout(() => el.remove(), 2000);
     }
 
-    // ─── WebRTC ────────────────────────────────────────────
-    async function startScreenShare() {
-        try {
-            // Browsers require video:true for getDisplayMedia
-            // We request both, then keep only audio
-            const displayStream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: {
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false
-                }
-            });
-
-            // Check if we got an audio track
-            const audioTracks = displayStream.getAudioTracks();
-            if (audioTracks.length === 0) {
-                // Stop video tracks since we don't need them
-                displayStream.getTracks().forEach(t => t.stop());
-                showToast('No audio detected! Make sure to check "Share tab audio" in the share dialog.', true);
-                return;
-            }
-
-            // Create a new stream with only the audio track
-            localStream = new MediaStream(audioTracks);
-
-            // Stop video tracks — we only need audio
-            displayStream.getVideoTracks().forEach(t => t.stop());
-
-            $('btnShareAudio').textContent = '🎵 Streaming Audio…';
-            $('btnShareAudio').classList.add('streaming');
-            $('npTitle').textContent = 'Streaming your audio';
-
-            // Send track update
-            send({
-                type: 'TRACK_UPDATE',
-                title: 'Live Audio Stream',
-                artist: myName,
-                platform: 'Screen Share',
-                isPlaying: true
-            });
-
-            // Handle stream ending
-            audioTracks[0].addEventListener('ended', () => {
-                stopSharing();
-            });
-
-            showToast('Audio sharing started!');
-
-            // Notify server to initiate peer connections for existing listeners
-            send({ type: 'AUDIO_READY' });
-
-        } catch (err) {
-            console.error('[WebRTC] Screen share error:', err);
-            if (err.name === 'NotAllowedError' || err.name === 'AbortError') {
-                showToast('Sharing cancelled. Click Share Tab Audio and select a tab to share.', true);
-            } else if (err.name === 'NotSupportedError') {
-                showToast('Your browser does not support screen sharing. Try Chrome or Edge on desktop.', true);
-            } else {
-                showToast(`Audio error: ${err.message || 'Unknown error'}. Try Chrome on desktop.`, true);
-            }
-        }
-    }
-
-    function stopSharing() {
-        if (localStream) {
-            localStream.getTracks().forEach(t => t.stop());
-            localStream = null;
-        }
-
-        $('btnShareAudio').textContent = 'Share Tab Audio';
-        $('btnShareAudio').classList.remove('streaming');
-        $('npTitle').textContent = 'Waiting for audio…';
-        $('npArtist').textContent = '';
-
-        send({
-            type: 'TRACK_UPDATE',
-            title: 'Stream ended',
-            isPlaying: false
-        });
-    }
-
-    function createPeerConnection(targetUserId, isInitiator) {
-        // Close existing connection if any
-        if (peerConnections[targetUserId]) {
-            peerConnections[targetUserId].close();
-        }
-
-        const pc = new RTCPeerConnection(rtcConfig);
-        peerConnections[targetUserId] = pc;
-
-        // Add local stream tracks (host sending audio)
-        if (localStream && myRole === 'host') {
-            localStream.getTracks().forEach(track => {
-                pc.addTrack(track, localStream);
-            });
-        }
-
-        // Handle incoming stream (listener receiving audio)
-        pc.ontrack = (event) => {
-            console.log('[WebRTC] Received remote track');
-            const audio = $('remoteAudio');
-            audio.srcObject = event.streams[0];
-            audio.play().catch(e => console.log('Autoplay blocked:', e));
-            $('npTitle').textContent = 'Receiving live audio…';
-        };
-
-        // ICE candidates
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                send({
-                    type: 'SIGNAL',
-                    targetUserId,
-                    signal: { type: 'ice-candidate', candidate: event.candidate }
-                });
-            }
-        };
-
-        pc.onconnectionstatechange = () => {
-            console.log(`[WebRTC] Connection state (${targetUserId}):`, pc.connectionState);
-            if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                pc.close();
-                delete peerConnections[targetUserId];
-            }
-        };
-
-        // Create offer if initiator (host)
-        if (isInitiator) {
-            pc.createOffer()
-                .then(offer => pc.setLocalDescription(offer))
-                .then(() => {
-                    send({
-                        type: 'SIGNAL',
-                        targetUserId,
-                        signal: { type: 'offer', sdp: pc.localDescription }
-                    });
-                })
-                .catch(err => console.error('[WebRTC] Offer error:', err));
-        }
-
-        return pc;
-    }
-
-    function handleSignal(msg) {
-        const { fromUserId, signal } = msg;
-
-        if (signal.type === 'offer') {
-            // Listener received offer from host
-            const pc = createPeerConnection(fromUserId, false);
-            pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
-                .then(() => pc.createAnswer())
-                .then(answer => pc.setLocalDescription(answer))
-                .then(() => {
-                    send({
-                        type: 'SIGNAL',
-                        targetUserId: fromUserId,
-                        signal: { type: 'answer', sdp: pc.localDescription }
-                    });
-                })
-                .catch(err => console.error('[WebRTC] Answer error:', err));
-
-        } else if (signal.type === 'answer') {
-            // Host received answer from listener
-            const pc = peerConnections[fromUserId];
-            if (pc) {
-                pc.setRemoteDescription(new RTCSessionDescription(signal.sdp))
-                    .catch(err => console.error('[WebRTC] setRemoteDescription error:', err));
-            }
-
-        } else if (signal.type === 'ice-candidate') {
-            const pc = peerConnections[fromUserId];
-            if (pc) {
-                pc.addIceCandidate(new RTCIceCandidate(signal.candidate))
-                    .catch(err => console.error('[WebRTC] ICE error:', err));
-            }
-        }
-    }
-
     // ─── Cleanup ───────────────────────────────────────────
     function cleanup() {
-        if (localStream) {
-            localStream.getTracks().forEach(t => t.stop());
-            localStream = null;
+        if (ytPlayer && ytReady) {
+            try { ytPlayer.stopVideo(); } catch (e) { }
         }
-        Object.values(peerConnections).forEach(pc => pc.close());
-        peerConnections = {};
         currentRoom = null;
         myRole = null;
 
         // Reset UI
         $('chatMessages').innerHTML = '<div class="system-msg">Welcome to the room! Say hi 👋</div>';
-        $('npTitle').textContent = 'Waiting for audio…';
-        $('npArtist').textContent = '';
-        $('btnShareAudio').textContent = 'Share Tab Audio';
-        $('btnShareAudio').classList.remove('streaming');
+        $('npTitle').textContent = 'No song playing';
+        $('playerPlaceholder').style.display = '';
+        $('ytPlayer').style.display = 'none';
+        updatePlayPauseUI(false);
     }
 
     // ─── Utility ───────────────────────────────────────────
@@ -553,43 +520,90 @@
         });
     });
 
-    // Room — Share Audio (Host)
-    $('btnShareAudio').addEventListener('click', () => {
-        if (localStream) {
-            stopSharing();
-        } else {
-            startScreenShare();
+    // Room — Play YouTube URL (Host)
+    function playUrl() {
+        const url = $('urlInput').value.trim();
+        if (!url) {
+            showToast('Paste a YouTube URL', true);
+            return;
         }
+
+        const videoId = extractVideoId(url);
+        if (!videoId) {
+            showToast('Invalid YouTube URL. Try a youtube.com or youtu.be link.', true);
+            return;
+        }
+
+        loadVideo(videoId, 'Loading...');
+
+        // Broadcast to all listeners
+        send({
+            type: 'PLAY_URL',
+            videoId,
+            title: 'Now Playing'
+        });
+
+        // Update title when video info loads
+        setTimeout(() => {
+            if (ytPlayer && ytReady) {
+                try {
+                    const data = ytPlayer.getVideoData();
+                    const title = data.title || 'Now Playing';
+                    $('npTitle').textContent = title;
+                    send({
+                        type: 'PLAY_URL',
+                        videoId,
+                        title
+                    });
+                } catch (e) { }
+            }
+        }, 3000);
+
+        $('urlInput').value = '';
+        showToast('Loading video...');
+    }
+
+    $('btnPlayUrl').addEventListener('click', playUrl);
+    $('urlInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') playUrl();
     });
 
     // Room — Playback Controls
     $('btnToggle').addEventListener('click', () => {
-        if (myRole === 'listener') {
+        if (myRole === 'host' && ytPlayer && ytReady) {
+            const state = ytPlayer.getPlayerState();
+            if (state === 1) {
+                ytPlayer.pauseVideo();
+            } else {
+                ytPlayer.playVideo();
+            }
+        } else if (myRole === 'listener') {
             send({ type: 'CONTROL', action: 'TOGGLE' });
         }
     });
+
     $('btnPrev').addEventListener('click', () => {
-        if (myRole === 'listener') {
+        if (myRole === 'host' && ytPlayer && ytReady) {
+            ytPlayer.seekTo(0, true);
+            send({
+                type: 'SYNC_STATE',
+                action: 'seek',
+                isPlaying: true,
+                currentTime: 0
+            });
+        } else if (myRole === 'listener') {
             send({ type: 'CONTROL', action: 'PREV' });
         }
     });
+
     $('btnNext').addEventListener('click', () => {
-        if (myRole === 'listener') {
+        if (myRole === 'host' && ytPlayer && ytReady) {
+            // Skip to end
+            const duration = ytPlayer.getDuration();
+            ytPlayer.seekTo(duration, true);
+        } else if (myRole === 'listener') {
             send({ type: 'CONTROL', action: 'NEXT' });
         }
-    });
-
-    // Room — Search
-    function doSearch() {
-        const query = $('searchInput').value.trim();
-        if (!query) return;
-        send({ type: 'SEARCH', query });
-        $('searchInput').value = '';
-        showToast(`Searching: "${query}"`);
-    }
-    $('btnSearch').addEventListener('click', doSearch);
-    $('searchInput').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') doSearch();
     });
 
     // Room — Chat

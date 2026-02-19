@@ -17,7 +17,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
 // ─── State ───────────────────────────────────────────────
-const rooms = new Map();       // roomCode → { host, listeners: Map, trackInfo, createdAt }
+const rooms = new Map();       // roomCode → { host, listeners, videoState, createdAt }
 const clientRooms = new Map(); // ws → { roomCode, userId, name, role }
 
 // ─── Helpers ─────────────────────────────────────────────
@@ -34,12 +34,10 @@ function broadcast(roomCode, message, excludeWs = null) {
 
     const payload = JSON.stringify(message);
 
-    // Send to host
     if (room.host?.ws && room.host.ws !== excludeWs && room.host.ws.readyState === 1) {
         room.host.ws.send(payload);
     }
 
-    // Send to all listeners
     for (const [, listener] of room.listeners) {
         if (listener.ws && listener.ws !== excludeWs && listener.ws.readyState === 1) {
             listener.ws.send(payload);
@@ -67,7 +65,7 @@ function getRoomInfo(roomCode) {
         hostName: room.host?.name || 'Unknown',
         listeners,
         listenerCount: room.listeners.size,
-        trackInfo: room.trackInfo || null,
+        videoState: room.videoState || null,
         createdAt: room.createdAt
     };
 }
@@ -93,7 +91,6 @@ wss.on('connection', (ws) => {
             // ━━━ Room Management ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
             case 'CREATE_ROOM': {
-                // If already in a room, leave it
                 leaveRoom(ws);
 
                 const roomCode = generateRoomCode();
@@ -102,7 +99,7 @@ wss.on('connection', (ws) => {
                 rooms.set(roomCode, {
                     host: { ws, userId, name },
                     listeners: new Map(),
-                    trackInfo: null,
+                    videoState: null,
                     createdAt: Date.now()
                 });
 
@@ -134,13 +131,12 @@ wss.on('connection', (ws) => {
                     return;
                 }
 
-                // Leave any existing room
                 leaveRoom(ws);
 
                 room.listeners.set(userId, { ws, userId, name });
                 clientRooms.set(ws, { roomCode: code, userId, name, role: 'listener' });
 
-                // Tell the joiner
+                // Tell the joiner (including current video state)
                 sendTo(ws, {
                     type: 'ROOM_JOINED',
                     roomCode: code,
@@ -157,15 +153,6 @@ wss.on('connection', (ws) => {
                     roomInfo: getRoomInfo(code)
                 }, ws);
 
-                // Tell the host to initiate WebRTC with this new listener
-                if (room.host?.ws) {
-                    sendTo(room.host.ws, {
-                        type: 'INITIATE_PEER',
-                        targetUserId: userId,
-                        targetName: name
-                    });
-                }
-
                 console.log(`[ROOM] ${name} joined ${code} (${room.listeners.size} listeners)`);
                 break;
             }
@@ -176,23 +163,75 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ━━━ WebRTC Signaling ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            // ━━━ YouTube Sync ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-            case 'SIGNAL': {
-                // Forward WebRTC signaling (offer/answer/ICE) to target peer
+            case 'PLAY_URL': {
+                // Host sends a YouTube URL to play
+                const info = clientRooms.get(ws);
+                if (!info || info.role !== 'host') return;
+
+                const room = rooms.get(info.roomCode);
+                if (!room) return;
+
+                room.videoState = {
+                    videoId: (msg.videoId || '').slice(0, 20),
+                    title: (msg.title || 'Unknown').slice(0, 100),
+                    isPlaying: true,
+                    currentTime: 0,
+                    timestamp: Date.now()
+                };
+
+                broadcast(info.roomCode, {
+                    type: 'PLAY_URL',
+                    ...room.videoState
+                }, ws);
+
+                console.log(`[VIDEO] Host playing: ${room.videoState.title} (${room.videoState.videoId})`);
+                break;
+            }
+
+            case 'SYNC_STATE': {
+                // Host syncs playback state (play/pause/seek)
+                const info = clientRooms.get(ws);
+                if (!info || info.role !== 'host') return;
+
+                const room = rooms.get(info.roomCode);
+                if (!room) return;
+
+                // Update room's video state
+                if (room.videoState) {
+                    room.videoState.isPlaying = !!msg.isPlaying;
+                    room.videoState.currentTime = msg.currentTime || 0;
+                    room.videoState.timestamp = Date.now();
+                }
+
+                // Broadcast to listeners only (not back to host)
+                broadcast(info.roomCode, {
+                    type: 'SYNC_STATE',
+                    action: msg.action, // 'play', 'pause', 'seek'
+                    isPlaying: !!msg.isPlaying,
+                    currentTime: msg.currentTime || 0
+                }, ws);
+
+                break;
+            }
+
+            // ━━━ Controls (Listener → Host) ━━━━━━━━━━━━━━━━━━━
+
+            case 'CONTROL': {
                 const info = clientRooms.get(ws);
                 if (!info) return;
 
                 const room = rooms.get(info.roomCode);
                 if (!room) return;
 
-                const targetWs = findPeerWs(room, msg.targetUserId);
-                if (targetWs) {
-                    sendTo(targetWs, {
-                        type: 'SIGNAL',
-                        fromUserId: info.userId,
+                if (info.role === 'listener' && room.host?.ws) {
+                    // Listener sends control to host
+                    sendTo(room.host.ws, {
+                        type: 'CONTROL',
+                        action: msg.action,
                         fromName: info.name,
-                        signal: msg.signal
+                        fromUserId: info.userId
                     });
                 }
                 break;
@@ -211,6 +250,7 @@ wss.on('connection', (ws) => {
                     message: (msg.message || '').slice(0, 500),
                     timestamp: Date.now()
                 });
+                console.log(`[CHAT] ${info.name}: ${(msg.message || '').slice(0, 50)}`);
                 break;
             }
 
@@ -227,24 +267,7 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ━━━ Playback Controls (Listener → Host) ━━━━━━━━━━
-
-            case 'CONTROL': {
-                const info = clientRooms.get(ws);
-                if (!info) return;
-
-                const room = rooms.get(info.roomCode);
-                if (!room || !room.host?.ws) return;
-
-                // Forward control action to host
-                sendTo(room.host.ws, {
-                    type: 'CONTROL',
-                    action: msg.action, // TOGGLE, NEXT, PREV
-                    fromName: info.name,
-                    fromUserId: info.userId
-                });
-                break;
-            }
+            // ━━━ Search (Listener → Host) ━━━━━━━━━━━━━━━━━━━━━
 
             case 'SEARCH': {
                 const info = clientRooms.get(ws);
@@ -253,56 +276,11 @@ wss.on('connection', (ws) => {
                 const room = rooms.get(info.roomCode);
                 if (!room || !room.host?.ws) return;
 
-                // Forward search to host
                 sendTo(room.host.ws, {
                     type: 'SEARCH',
                     query: (msg.query || '').slice(0, 200),
                     fromName: info.name
                 });
-                break;
-            }
-
-            // ━━━ Track Info (Host → Everyone) ━━━━━━━━━━━━━━━━━
-
-            case 'TRACK_UPDATE': {
-                const info = clientRooms.get(ws);
-                if (!info || info.role !== 'host') return;
-
-                const room = rooms.get(info.roomCode);
-                if (!room) return;
-
-                room.trackInfo = {
-                    title: (msg.title || 'Unknown').slice(0, 100),
-                    artist: (msg.artist || '').slice(0, 100),
-                    platform: (msg.platform || '').slice(0, 30),
-                    isPlaying: !!msg.isPlaying
-                };
-
-                broadcast(info.roomCode, {
-                    type: 'TRACK_UPDATE',
-                    ...room.trackInfo
-                }, ws);
-                break;
-            }
-
-            // ━━━ Audio Ready (Host notifies server) ━━━━━━━━━━━━━
-
-            case 'AUDIO_READY': {
-                const info = clientRooms.get(ws);
-                if (!info || info.role !== 'host') return;
-
-                const room = rooms.get(info.roomCode);
-                if (!room) return;
-
-                // Tell host to initiate WebRTC for each existing listener
-                for (const [, listener] of room.listeners) {
-                    sendTo(ws, {
-                        type: 'INITIATE_PEER',
-                        targetUserId: listener.userId,
-                        targetName: listener.name
-                    });
-                }
-                console.log(`[AUDIO] Host ${info.name} ready, initiating peers for ${room.listeners.size} listeners`);
                 break;
             }
 
@@ -332,7 +310,6 @@ function leaveRoom(ws) {
     if (!room) return;
 
     if (info.role === 'host') {
-        // Host left → close the room
         broadcast(info.roomCode, {
             type: 'ROOM_CLOSED',
             message: 'The host has ended the session.'
@@ -340,7 +317,6 @@ function leaveRoom(ws) {
         rooms.delete(info.roomCode);
         console.log(`[ROOM] Closed: ${info.roomCode} (host left)`);
     } else {
-        // Listener left
         room.listeners.delete(info.userId);
         broadcast(info.roomCode, {
             type: 'USER_LEFT',
@@ -355,13 +331,7 @@ function leaveRoom(ws) {
     clientRooms.delete(ws);
 }
 
-function findPeerWs(room, targetUserId) {
-    if (room.host && room.host.userId === targetUserId) return room.host.ws;
-    const listener = room.listeners.get(targetUserId);
-    return listener?.ws || null;
-}
-
-// ─── Heartbeat (detect dead connections) ─────────────────
+// ─── Heartbeat ───────────────────────────────────────────
 const heartbeat = setInterval(() => {
     wss.clients.forEach((ws) => {
         if (!ws.isAlive) {
@@ -376,11 +346,10 @@ const heartbeat = setInterval(() => {
 
 wss.on('close', () => clearInterval(heartbeat));
 
-// ─── Cleanup stale rooms every 5 minutes ─────────────────
+// ─── Cleanup stale rooms ─────────────────────────────────
 setInterval(() => {
     const now = Date.now();
     for (const [code, room] of rooms) {
-        // Close rooms older than 6 hours with no listeners
         if (room.listeners.size === 0 && now - room.createdAt > 6 * 60 * 60 * 1000) {
             rooms.delete(code);
             console.log(`[CLEANUP] Removed stale room: ${code}`);
