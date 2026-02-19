@@ -57,36 +57,58 @@
     }
 
     // ─── WebSocket Connection ──────────────────────────────
+    let messageQueue = [];
+    let reconnectAttempts = 0;
+
     function connectWebSocket() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${location.host}`;
 
+        console.log('[WS] Connecting to:', wsUrl);
         ws = new WebSocket(wsUrl);
 
         ws.addEventListener('open', () => {
-            console.log('[WS] Connected');
+            console.log('[WS] Connected!');
+            reconnectAttempts = 0;
+
+            // Flush queued messages
+            while (messageQueue.length > 0) {
+                const msg = messageQueue.shift();
+                ws.send(JSON.stringify(msg));
+                console.log('[WS] Sent queued:', msg.type);
+            }
         });
 
         ws.addEventListener('message', (event) => {
             let msg;
             try { msg = JSON.parse(event.data); } catch { return; }
+            console.log('[WS] Received:', msg.type);
             handleServerMessage(msg);
         });
 
-        ws.addEventListener('close', () => {
-            console.log('[WS] Disconnected');
-            // Auto-reconnect after 3s
-            setTimeout(connectWebSocket, 3000);
+        ws.addEventListener('close', (event) => {
+            console.log('[WS] Disconnected, code:', event.code, 'reason:', event.reason);
+            reconnectAttempts++;
+            const delay = Math.min(1000 * reconnectAttempts, 10000);
+            setTimeout(connectWebSocket, delay);
         });
 
-        ws.addEventListener('error', () => {
-            console.log('[WS] Error');
+        ws.addEventListener('error', (err) => {
+            console.error('[WS] Error:', err);
         });
     }
 
     function send(message) {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(message));
+            console.log('[WS] Sent:', message.type);
+        } else {
+            console.log('[WS] Queued (not open yet):', message.type);
+            messageQueue.push(message);
+            // Try reconnecting if not connected
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                connectWebSocket();
+            }
         }
     }
 
