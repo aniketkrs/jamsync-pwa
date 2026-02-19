@@ -1,9 +1,11 @@
-const CACHE_NAME = 'jamsync-v1';
+const CACHE_NAME = 'jamsync-v3';
 const ASSETS = [
     '/',
     '/app.css',
     '/app.js',
-    '/manifest.json'
+    '/manifest.json',
+    '/icons/icon-192.png',
+    '/icons/icon-512.png'
 ];
 
 self.addEventListener('install', (e) => {
@@ -27,6 +29,6 @@ self.addEventListener('fetch', (e) => {
     if (e.request.url.includes('/ws') || e.request.url.includes('/health')) return;
 
     e.respondWith(
-        caches.match(e.request).then((cached) => cached || fetch(e.request))
+        fetch(e.request).catch(() => caches.match(e.request))
     );
 });
