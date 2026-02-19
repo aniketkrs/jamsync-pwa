@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0f">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="JamSync — Listen to music together, anywhere in the world">
+    <title>JamSync</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icons/icon-192.png">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/app.css">
+</head>
+
+<body>
+
+    <!-- ═══ Landing Screen ═══ -->
+    <div id="landingScreen" class="screen active">
+        <div class="landing-container">
+            <!-- Logo -->
+            <div class="logo-section">
+                <div class="logo-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="11" stroke="url(#logoGrad)" stroke-width="1.5" />
+                        <path d="M9 18V8l8-2v10" stroke="url(#logoGrad)" stroke-width="1.5" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <circle cx="7" cy="18" r="2" fill="url(#logoGrad)" />
+                        <circle cx="15" cy="16" r="2" fill="url(#logoGrad)" />
+                        <defs>
+                            <linearGradient id="logoGrad" x1="0" y1="0" x2="24" y2="24">
+                                <stop stop-color="#a78bfa" />
+                                <stop offset="1" stop-color="#6c5ce7" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <h1 class="logo-title">JamSync</h1>
+                <p class="logo-subtitle">Listen together, anywhere in the world</p>
+            </div>
+
+            <!-- Name Input -->
+            <div class="name-section">
+                <label class="input-label">Your Name</label>
+                <input type="text" id="nameInput" class="glass-input" placeholder="Enter your name…" maxlength="20"
+                    autocomplete="off">
+            </div>
+
+            <!-- Actions -->
+            <div class="action-cards">
+                <!-- Create Room -->
+                <button class="action-card" id="btnCreate">
+                    <div class="action-icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 5v14M5 12h14" />
+                        </svg>
+                    </div>
+                    <span class="action-title">Create Room</span>
+                    <span class="action-desc">Share your music with friends</span>
+                </button>
+
+                <!-- Join Room -->
+                <button class="action-card" id="btnJoinToggle">
+                    <div class="action-icon join-icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4" />
+                            <polyline points="10 17 15 12 10 7" />
+                            <line x1="15" y1="12" x2="3" y2="12" />
+                        </svg>
+                    </div>
+                    <span class="action-title">Join Room</span>
+                    <span class="action-desc">Listen with someone broadcasting</span>
+                </button>
+            </div>
+
+            <!-- Join Code Input (hidden by default) -->
+            <div id="joinSection" class="join-section hidden">
+                <label class="input-label">Room Code</label>
+                <div class="code-input-row">
+                    <input type="text" id="codeInput" class="glass-input code-input" placeholder="e.g. JAMSYNC"
+                        maxlength="6" autocomplete="off"
+                        style="text-transform: uppercase; letter-spacing: 4px; text-align: center;">
+                    <button class="btn-primary" id="btnJoin">Join</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Room Screen ═══ -->
+    <div id="roomScreen" class="screen">
+        <div class="room-container">
+
+            <!-- Room Header -->
+            <div class="room-header">
+                <button class="btn-icon" id="btnLeave" title="Leave Room">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+                <div class="room-title-area">
+                    <h2 class="room-title">JamSync</h2>
+                    <div class="room-code-badge" id="roomCodeBadge" title="Click to copy">
+                        <span id="roomCodeText">------</span>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                        </svg>
+                    </div>
+                </div>
+                <div class="room-meta">
+                    <span class="listener-count" id="listenerCount">0 listening</span>
+                </div>
+            </div>
+
+            <!-- Now Playing -->
+            <div class="now-playing-card" id="nowPlayingCard">
+                <div class="np-visualizer">
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                    <div class="bar"></div>
+                </div>
+                <div class="np-info">
+                    <div class="np-title" id="npTitle">Waiting for audio…</div>
+                    <div class="np-artist" id="npArtist"></div>
+                </div>
+                <div class="np-status" id="npStatus">
+                    <span class="live-dot"></span> LIVE
+                </div>
+            </div>
+
+            <!-- Playback Controls -->
+            <div class="controls-row">
+                <button class="ctrl-btn" id="btnPrev" title="Previous">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+                    </svg>
+                </button>
+                <button class="ctrl-btn ctrl-play" id="btnToggle" title="Play/Pause">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M8 5v14l11-7z" />
+                    </svg>
+                </button>
+                <button class="ctrl-btn" id="btnNext" title="Next">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M6 18l8.5-6L6 6v12zm10-12h2v12h-2z" />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Share Audio Button (Host only) -->
+            <button class="btn-share-audio hidden" id="btnShareAudio">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="23 7 16 12 23 17 23 7" />
+                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                </svg>
+                Share Tab Audio
+            </button>
+
+            <!-- Search Bar -->
+            <div class="search-bar">
+                <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input type="text" id="searchInput" class="search-input" placeholder="Search for a song…"
+                    maxlength="200">
+                <button class="search-btn" id="btnSearch">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                        <polyline points="12 5 19 12 12 19" />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Reactions -->
+            <div class="reactions-row">
+                <button class="reaction-btn" data-emoji="🔥">🔥</button>
+                <button class="reaction-btn" data-emoji="❤️">❤️</button>
+                <button class="reaction-btn" data-emoji="😂">😂</button>
+                <button class="reaction-btn" data-emoji="👏">👏</button>
+                <button class="reaction-btn" data-emoji="🎉">🎉</button>
+                <button class="reaction-btn" data-emoji="👎">👎</button>
+            </div>
+
+            <!-- Floating Reactions Container -->
+            <div id="reactionFloat" class="reaction-float-container"></div>
+
+            <!-- Tab Panels -->
+            <div class="tab-bar">
+                <button class="tab-btn active" data-tab="chat">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                    </svg>
+                    Chat
+                </button>
+                <button class="tab-btn" data-tab="listeners">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M23 21v-2a4 4 0 00-3-3.87" />
+                        <path d="M16 3.13a4 4 0 010 7.75" />
+                    </svg>
+                    Listeners
+                </button>
+            </div>
+
+            <!-- Chat Panel -->
+            <div class="tab-panel active" id="panelChat">
+                <div class="chat-messages" id="chatMessages">
+                    <div class="system-msg">Welcome to the room! Say hi 👋</div>
+                </div>
+                <div class="chat-input-row">
+                    <input type="text" id="chatInput" class="glass-input chat-input" placeholder="Type a message…"
+                        maxlength="500">
+                    <button class="btn-send" id="btnSend">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Listeners Panel -->
+            <div class="tab-panel" id="panelListeners">
+                <div class="listener-list" id="listenerList">
+                    <div class="empty-state">No listeners yet — share your room code!</div>
+                </div>
+            </div>
+
+            <!-- Hidden audio element for receiving stream -->
+            <audio id="remoteAudio" autoplay></audio>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+
+</html>
